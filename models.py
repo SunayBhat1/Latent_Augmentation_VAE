@@ -29,16 +29,19 @@ class MLP(nn.Module):
         return x
 
 class Encoder(nn.Module):
-    def __init__(self,num_filters,latent_dim):
+    def __init__(self,num_filters,latent_dim,image_dim=32):
         super(Encoder, self).__init__()
 
         self.num_filters = num_filters
         self.latent_dims = latent_dim
+        self.image_dim = image_dim
 
-        self.conv1 = nn.Conv2d(in_channels=1, out_channels=num_filters, kernel_size=4, stride=2, padding=1) # out: c x 16 x 16
-        self.conv2 = nn.Conv2d(in_channels=num_filters, out_channels=num_filters*2, kernel_size=4, stride=2, padding=1) # out: c x 8 x 8
-        self.fc_mu = nn.Linear(in_features=num_filters*2*8*8, out_features=latent_dim)
-        self.fc_logvar = nn.Linear(in_features=num_filters*2*8*8, out_features=latent_dim)
+        filter_dim_1 = self.image_dim // 4
+
+        self.conv1 = nn.Conv2d(in_channels=1, out_channels=num_filters, kernel_size=4, stride=2, padding=1) # out: c x image_dim/2 x image_dim/2
+        self.conv2 = nn.Conv2d(in_channels=num_filters, out_channels=num_filters*2, kernel_size=4, stride=2, padding=1) # out: c x image_dim/4 x image_dim/4
+        self.fc_mu = nn.Linear(in_features=num_filters*2*filter_dim_1*filter_dim_1, out_features=latent_dim)
+        self.fc_logvar = nn.Linear(in_features=num_filters*2*filter_dim_1*filter_dim_1, out_features=latent_dim)
             
     def forward(self, x):
         x = F.relu(self.conv1(x))
@@ -49,32 +52,42 @@ class Encoder(nn.Module):
         return x_mu, x_logvar
 
 class Decoder(nn.Module):
-    def __init__(self,num_filters,latent_dim):
+    def __init__(self,num_filters,latent_dim,image_dim=32):
         super(Decoder, self).__init__()
 
         self.num_filters = num_filters
         self.latent_dims = latent_dim
+        self.image_dim = image_dim
 
-        self.fc = nn.Linear(in_features=latent_dim, out_features=num_filters*2*8*8)
+        self.filter_dim_1 = self.image_dim // 4
+
+        self.fc = nn.Linear(in_features=latent_dim, out_features=num_filters*2*self.filter_dim_1*self.filter_dim_1)
         self.conv2 = nn.ConvTranspose2d(in_channels=num_filters*2, out_channels=num_filters, kernel_size=4, stride=2, padding=1)
         self.conv1 = nn.ConvTranspose2d(in_channels=num_filters, out_channels=1, kernel_size=4, stride=2, padding=1)
             
     def forward(self, x):
         x = self.fc(x)
-        x = x.view(x.size(0), self.num_filters*2, 8, 8) # unflatten batch of feature vectors to a batch of multi-channel feature maps
+        x = x.view(x.size(0), self.num_filters*2, self.filter_dim_1, self.filter_dim_1) # unflatten batch of feature vectors to a batch of multi-channel feature maps
         x = F.relu(self.conv2(x))
         x = torch.sigmoid(self.conv1(x)) # last layer before output is sigmoid, since we are using BCE as reconstruction loss
         return x
     
-class LTVAE(nn.Module):
+class LAVAE(nn.Module):
     def __init__(self,
                 num_filters=64,
-                latent_dim=2,):
-        super(LTVAE, self).__init__()
+                latent_dim=2,
+                image_dim=32,
+                latent_linear=False,
+                ):
+        super(LAVAE, self).__init__()
         
-        self.encoder = Encoder(num_filters=num_filters, latent_dim=latent_dim)
-        self.decoder = Decoder(num_filters=num_filters, latent_dim=latent_dim)
-        self.Laug = MLP(input_dim=latent_dim, output_dim=latent_dim, layers=[8,8])
+        self.encoder = Encoder(num_filters=num_filters, latent_dim=latent_dim, image_dim=image_dim)
+        self.decoder = Decoder(num_filters=num_filters, latent_dim=latent_dim, image_dim=image_dim)
+        if latent_linear:
+            self.Laug = nn.Parameter(torch.zeros((latent_dim,latent_dim)))
+            torch.nn.init.xavier_uniform_(self.Laug) #or any other init method
+        else:
+            self.Laug = MLP(input_dim=latent_dim, output_dim=latent_dim, layers=[8,8])
     
     def forward(self, x):
         latent_mu, latent_logvar = self.encoder(x)
@@ -93,8 +106,9 @@ class LTVAE(nn.Module):
 
 class torch_dataloader(data.Dataset):
 
-    def __init__(self, data_array):
+    def __init__(self, data_array, transform=None):
         self.data = data_array
+        self.transform = transform
 
     def __len__(self):
         return len(self.data)
@@ -104,13 +118,18 @@ class torch_dataloader(data.Dataset):
 
 class torch_latent_dataloader(data.Dataset):
 
-    def __init__(self, data_array,flipped_array):
+    def __init__(self, data_array,flipped_array, transform=None):
         self.data = data_array
         self.flipped_data = flipped_array
+        self.transform = transform
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return self.data[idx],self.flipped_data[idx]
+
+        if self.transform:
+            return self.transform(self.data[idx]),self.transform(self.flipped_data[idx])
+        else:
+            return self.data[idx],self.flipped_data[idx]
 
