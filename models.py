@@ -104,6 +104,7 @@ class LAVAE(nn.Module):
         else:
             return mu
 
+# Used for checkerboard data
 class torch_dataloader(data.Dataset):
 
     def __init__(self, data_array, transform=None):
@@ -116,6 +117,7 @@ class torch_dataloader(data.Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
+# Load original and augmented images for Laug trainig
 class torch_latent_dataloader(data.Dataset):
 
     def __init__(self, data_array,flipped_array, transform=None):
