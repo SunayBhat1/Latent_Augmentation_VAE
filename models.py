@@ -6,8 +6,19 @@ from torch.utils import data
 import numpy as np
 
 
+#####  Latent Augmentation VAE   ####################################
+
+### Subclasses ###
+
 class MLP(nn.Module):
     def __init__(self, input_dim, output_dim, layers=[16,16], activation=F.relu):
+        '''
+        Multi-layer perceptron
+        input_dim: dimension of input
+        output_dim: dimension of output
+        layers: list of hidden layer dimensions
+        activation: activation function
+        '''
         super(MLP, self).__init__()
 
         self.input_dim = input_dim
@@ -29,7 +40,13 @@ class MLP(nn.Module):
         return x
 
 class Encoder(nn.Module):
-    def __init__(self,num_filters,latent_dim,image_dim=32):
+    def __init__(self, latent_dim, num_filters, image_dim=28):
+        '''
+        Image Encoder Network
+        num_filters: number of filters in convolutional layers
+        latent_dim: dimension of latent space
+        image_dim: dimension of input image
+        '''
         super(Encoder, self).__init__()
 
         self.num_filters = num_filters
@@ -52,14 +69,21 @@ class Encoder(nn.Module):
         return x_mu, x_logvar
 
 class Decoder(nn.Module):
-    def __init__(self,num_filters,latent_dim,image_dim=32):
+    def __init__(self, latent_dim, num_filters, image_dim=28, augs=None):
+        '''
+        Image Decoder Network
+        num_filters: number of filters in convolutional layers
+        latent_dim: dimension of latent space
+        image_dim: dimension of input image
+        '''
         super(Decoder, self).__init__()
 
         self.num_filters = num_filters
         self.latent_dims = latent_dim
         self.image_dim = image_dim
+        self.augs = augs
 
-        self.filter_dim_1 = self.image_dim // 4
+        self.filter_dim_1 = self.image_dim // 4 # Divide and round down (floor)
 
         self.fc = nn.Linear(in_features=latent_dim, out_features=num_filters*2*self.filter_dim_1*self.filter_dim_1)
         self.conv2 = nn.ConvTranspose2d(in_channels=num_filters*2, out_channels=num_filters, kernel_size=4, stride=2, padding=1)
@@ -71,32 +95,51 @@ class Decoder(nn.Module):
         x = F.relu(self.conv2(x))
         x = torch.sigmoid(self.conv1(x)) # last layer before output is sigmoid, since we are using BCE as reconstruction loss
         return x
-    
+
+
+
 class LAVAE(nn.Module):
     def __init__(self,
-                num_filters=64,
                 latent_dim=2,
-                image_dim=32,
-                latent_linear=False,
+                num_dec = 1,
+                num_filters=256,
+                image_dim=28,
+                augs=['augs'],
+                llinear=True,
                 ):
+        '''
+        Latent Augmented Variational Autoencoder
+        num_filters: number of filters in convolutional layers
+        latent_dim: dimension of latent space
+        image_dim: dimension of input image
+        augs: list of latent augmentations
+        '''
         super(LAVAE, self).__init__()
+
+        self.latent_dim = latent_dim
+        self.trained_augs = augs
+        self.num_dec = num_dec
+        self.latent_linear = llinear
+        self.losses = {}
         
         self.encoder = Encoder(num_filters=num_filters, latent_dim=latent_dim, image_dim=image_dim)
-        self.decoder = Decoder(num_filters=num_filters, latent_dim=latent_dim, image_dim=image_dim)
-        if latent_linear:
-            self.Laug = nn.Parameter(torch.zeros((latent_dim,latent_dim)))
-            torch.nn.init.xavier_uniform_(self.Laug) #or any other init method
+        self.decoders = nn.ModuleList([Decoder(num_filters=num_filters, latent_dim=latent_dim, image_dim=image_dim) for iDec in range(num_dec)])
+        self.decoders[0].augs = augs
+        if llinear:
+            self.Laugs = nn.ParameterList([nn.Parameter(torch.zeros((latent_dim,latent_dim))) for _ in augs])
+            for laug in self.Laugs: 
+                torch.nn.init.xavier_uniform_(laug) #or any other init method
         else:
-            self.Laug = MLP(input_dim=latent_dim, output_dim=latent_dim, layers=[8,8])
+            self.Laugs = nn.ModuleDict({aug: MLP(input_dim=latent_dim, output_dim=latent_dim, layers=[8,8]) for aug in augs})
     
-    def forward(self, x):
+    def forward(self, x,iDec=0):
         latent_mu, latent_logvar = self.encoder(x)
         latent = self.latent_sample(latent_mu, latent_logvar)
-        x_recon = self.decoder(latent)
+        x_recon = self.decoders[iDec](latent)
         return x_recon, latent_mu, latent_logvar
     
-    def latent_sample(self, mu, logvar):
-        if self.training:
+    def latent_sample(self, mu, logvar,bypass=False):
+        if self.training or bypass:
             # the reparameterization trick
             std = logvar.mul(0.5).exp_()
             eps = torch.empty_like(std).normal_()
@@ -104,34 +147,43 @@ class LAVAE(nn.Module):
         else:
             return mu
 
-# Used for checkerboard data
+# Used for custom data
 class torch_dataloader(data.Dataset):
 
-    def __init__(self, data_array, transform=None):
+    def __init__(self, data_array, transform=None,targets=None):
         self.data = data_array
+        self.targets = targets
         self.transform = transform
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return self.data[idx]
+        if self.transform:
+            if self.targets is not None:
+                return self.transform(self.data[idx]).to(torch.float32), self.targets[idx]
+            else:
+                return self.transform(self.data[idx]).to(torch.float32)
+        else:
+            if self.targets is not None:
+                return self.data[idx].to(torch.float32), self.targets[idx]
+            else:
+                return self.data[idx].to(torch.float32)
 
 # Load original and augmented images for Laug trainig
 class torch_latent_dataloader(data.Dataset):
 
-    def __init__(self, data_array,flipped_array, transform=None):
-        self.data = data_array
-        self.flipped_data = flipped_array
+    def __init__(self, data_arrays, transform=None):
+        self.data_arrays = data_arrays
         self.transform = transform
 
     def __len__(self):
-        return len(self.data)
+        return len(self.data_arrays['orig'])
 
     def __getitem__(self, idx):
 
         if self.transform:
-            return self.transform(self.data[idx]),self.transform(self.flipped_data[idx])
+            return {a: self.transform(data[idx]).to(torch.float32) for a,data in self.data_arrays.items()} #tuple([self.transform(data[idx]) for data in self.data_arrays])
         else:
-            return self.data[idx],self.flipped_data[idx]
+            return {a: data[idx].to(torch.float32) for a,data in self.data_arrays.items()} #tuple([data[idx] for data in self.data_arrays]) 
 
