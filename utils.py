@@ -605,6 +605,8 @@ def plot_2D_spaces(model, test_loader, device, augs, decoder=0, save_path=None, 
 
     if save_path is not None:
         plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
+
+    return pca, tsne, ica
         
 
 def plot_2D_spaces_Inv(model, test_loader, device, augs, decoder=0, save_path=None, types = ['PCA', 'TSNE', 'ICA']):
@@ -682,6 +684,8 @@ def plot_2D_spaces_Inv(model, test_loader, device, augs, decoder=0, save_path=No
 
     if save_path is not None:
         plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
+
+    return pca, tsne, ica
 
 
 
@@ -774,11 +778,10 @@ def sample_latent(model,train_loader,device,augs,decoder=0,num_samples=12,save_p
         z_s.append(z.cpu().detach().numpy())
 
     z_s = np.concatenate(z_s, axis=0)
-    num_samples = 16
     z_sampled = np.random.normal(z_s.mean(axis=0).reshape(-1,1).repeat(num_samples, axis=1), z_s.std(axis=0).reshape(-1,1).repeat(num_samples, axis=1))
 
-    z_sampled = torch.from_numpy(z_sampled).float().to(device)
-    x_sampled['orig'] = model.decoders[decoder](z_sampled).cpu().detach().numpy()
+    z_sampled = torch.from_numpy(z_sampled).float().to(device).T
+    x_sampled['Sampled'] = model.decoders[decoder](z_sampled).cpu().detach().numpy()
     x_sampled[augs[0]] = model.decoders[decoder](z_sampled @ model.Laugs[0]).cpu().detach().numpy()
     x_sampled[augs[1]] = model.decoders[decoder](z_sampled @ model.Laugs[1]).cpu().detach().numpy()
     x_sampled['compose'] = model.decoders[decoder](z_sampled @ model.Laugs[0] @ model.Laugs[1]).cpu().detach().numpy()
@@ -792,3 +795,124 @@ def sample_latent(model,train_loader,device,augs,decoder=0,num_samples=12,save_p
         ax[i].set_xticks([])
         ax[i].set_yticks([])
     plt.subplots_adjust(wspace=0.1, hspace=0.1)
+
+def interpolate(model, test_loader, device, augs, decoder=0, n_steps=10,latent_dim=16):
+
+    # two random indices
+    idx1 = np.random.randint(0, 64)
+    idx2 = np.random.randint(0, 64)
+    x = next(iter(test_loader))['orig'][[idx1,idx2]].to(device)
+
+    # get latent vectors
+    z = model.encoder(x)[0]
+
+    z_inter = torch.zeros(n_steps, z[0].shape[0]).to(device)
+    for i in range(n_steps):
+        z_inter[i] = z[0] + (z[1] - z[0]) * i / (n_steps - 1)
+
+    z_inter = torch.cat((z[0].reshape(-1,latent_dim),z_inter,z[1].reshape(-1,latent_dim)))
+    x_sampled = {}
+    x_sampled['orig'] = model.decoders[decoder](z_inter).cpu().detach().numpy()
+    x_sampled[augs[0]] = model.decoders[decoder](z_inter @ model.Laugs[0]).cpu().detach().numpy()
+    x_sampled[augs[1]] = model.decoders[decoder](z_inter @ model.Laugs[1]).cpu().detach().numpy()
+    x_sampled['compose'] = model.decoders[decoder](z_inter @ model.Laugs[0] @ model.Laugs[1]).cpu().detach().numpy()
+    x_sampled['r_compose'] = model.decoders[decoder](z_inter @ model.Laugs[1] @ model.Laugs[0]).cpu().detach().numpy()
+
+    fig, ax = plt.subplots(n_steps+2, 5, figsize=(4,n_steps+2))
+    for i, (k, v) in enumerate(x_sampled.items()):
+        for j in range(n_steps+2):
+            ax[j,i].imshow(v[j].reshape(-1, 28), cmap='gray')
+            ax[j,i].set_xticks([])
+            ax[j,i].set_yticks([])
+            if j == 0: ax[j,i].set_title(k,rotation=45)
+    ax[0,0].set_ylabel('Test Sample 1', rotation=25, labelpad=40)
+    ax[n_steps+1,0].set_ylabel('Test Sample 2', rotation=25, labelpad=40)
+       
+    plt.subplots_adjust(wspace=0.1, hspace=0.1)
+
+
+def plot_2D_tSNE_latent(model, test_loader, device, augs, decoder=0, save_path=None, types = ['PCA', 'TSNE', 'ICA']):
+
+    plt.style.use('seaborn')
+
+    model.eval()
+
+    # Sample from test set
+    images = []
+    z_s = []
+    aug_labels = []
+
+    latents = []
+    latent_recons = []
+    latent_aug_labels = []
+
+    for i, (x,lab) in enumerate(test_loader):
+        x = x.to(device)
+        x_hat,z,_ = model(x)
+
+        images.append(x.cpu().detach().numpy())
+        z_s.append(z.cpu().detach().numpy())
+        # recons.append(x_hat.cpu().detach().numpy())
+        aug_labels.append(lab.cpu().detach().numpy())
+
+    images = np.concatenate(images)
+    z_s = np.concatenate(z_s)
+    # recons = np.concatenate(recons)
+    aug_labels = np.concatenate(aug_labels)
+
+    # Latent reconstruction
+    latent_recons.append(images[aug_labels==0])
+    latents.append(z_s[aug_labels==0])
+    latent_aug_labels.append(torch.ones(images[aug_labels==0].shape[0]).cpu().detach().numpy() * 0)
+
+    for i,aug in enumerate(augs):
+        z = torch.from_numpy(z_s[aug_labels==0]).to(device) @ model.Laugs[i]
+        latents.append(z.cpu().detach().numpy())
+        x_latent = model.decoders[decoder](z)
+        latent_recons.append(x_latent.cpu().detach().numpy())
+        latent_aug_labels.append(torch.ones(x_latent.shape[0]).cpu().detach().numpy() * (i+1))
+
+    if len(model.Laugs) == 2:
+        z = torch.from_numpy(z_s[aug_labels==0]).to(device) @ model.Laugs[0] @ model.Laugs[1]
+        latents.append(z.cpu().detach().numpy())
+        x_latent = model.decoders[decoder](z)
+        latent_recons.append(x_latent.cpu().detach().numpy())
+        latent_aug_labels.append(torch.ones(x_latent.shape[0]).cpu().detach().numpy() * 3)
+
+        z = torch.from_numpy(z_s[aug_labels==0]).to(device) @ model.Laugs[1] @ model.Laugs[0]
+        latents.append(z.cpu().detach().numpy())
+        x_latent = model.decoders[decoder](z)
+        latent_recons.append(x_latent.cpu().detach().numpy())
+        latent_aug_labels.append(torch.ones(x_latent.shape[0]).cpu().detach().numpy() * 4)
+
+    for i in range(len(latents)):
+        print(latents[i].shape)
+    latents = np.concatenate(latents)
+    latent_recons = np.concatenate(latent_recons)
+    latent_aug_labels = np.concatenate(latent_aug_labels)
+
+    # 2-D Projections
+    pca = PCA(n_components=2)
+    tsne = TSNE(n_components=2, perplexity=40, n_iter=300)
+    ica = FastICA(n_components=2, max_iter=1000)
+
+    project = {}
+
+    project['PCA'] = pca.fit_transform(latents.reshape(latents.shape[0],-1))
+    project['TSNE'] = tsne.fit_transform(latents.reshape(latents.shape[0],-1))
+    project['ICA'] = ica.fit_transform(latents.reshape(latents.shape[0],-1) + 1e-6)
+
+    labels = ['Orig',augs[0], augs[1],'Compose']
+    fig, ax = plt.subplots(1, 1, figsize=(10,10))
+    for i in range(4):
+        alpha = 0.5
+        label = labels[i]
+        ax.scatter(project['ICA'][latent_aug_labels==i,0], project['ICA'][latent_aug_labels==i,1],label=label, alpha=alpha)
+
+    ax.set_title('2-D Projection ICA\nfrom 16-D', fontsize=20, fontweight='bold')
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
+
+    return pca, tsne, ica
