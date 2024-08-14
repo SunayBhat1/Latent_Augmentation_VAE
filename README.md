@@ -4,6 +4,10 @@ This repository contains the implementation of the Latent Augmentation Variation
 
 arXiv: https://arxiv.org/abs/2303.03462
 
+![LAVAE](imgs/LAVAE.png)
+
+See presentations [here](imgs/LAVAE.pdf)
+
 ## Overview
 
 LAVAE is a novel approach for latent space image augmentation that allows for easy combination of multiple augmentations. The framework is based on the Variational Autoencoder (VAE) architecture and uses a new method for augmentation via linear transformation within the latent space itself.
